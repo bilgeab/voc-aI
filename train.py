@@ -220,8 +220,6 @@ def main():
     registry = get_dataset_registry()
 
     # Registry dataset classes default to a path relative to the MML26 repo
-    # (e.g. "klangiodataset"); resolve it there explicitly so it works regardless
-    # of the caller's cwd.
     def _registry_dataset(name, groups):
         cls = registry[name]["class"]
         default_relative_path = cls.__init__.__defaults__[0]
@@ -260,8 +258,6 @@ def main():
 
     # --- Output layout --------------------------------------------------------
     # runs/<experiment_name>/  ->  checkpoints/best.ckpt + run_config.json + metrics.json
-    # wandb's own local cache (if any) lives outside this directory; only the
-    # artifacts we actually compare runs by are kept here.
     run_dir = Path(args.runs_dir) / experiment_name
     checkpoint_dir = run_dir / "checkpoints"
     if checkpoint_dir.is_dir():
@@ -300,7 +296,6 @@ def main():
         monitor=monitor_metric, mode="max", patience=args.patience, verbose=True,
     )
 
-    # Persist the full run config (training args + which data was used) next to the weights.
     run_config = {
         "experiment_name": experiment_name,
         "dataset_path": str(dataset_path),
