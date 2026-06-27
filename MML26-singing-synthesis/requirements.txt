@@ -16,3 +16,4 @@ wandb
 nnAudio
 pretty_midi
 pyworld
+audiomentations
