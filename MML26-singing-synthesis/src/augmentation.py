@@ -17,7 +17,7 @@ We realize that band with a ``BandPassFilter`` whose center/bandwidth are pinned
 asked for explicitly; it reinforces the band's upper roll-off).
 
 Files with no active notes are passed through untouched. The augmentation fires
-on a fraction ``p`` of samples (default 0.5) so the model still sees plenty of
+on a fraction ``p`` of samples (default 0.6) so the model still sees plenty of
 clean, full-band vocals — applying it to every sample would shift the whole
 training distribution toward "filtered" and hurt on full-band test audio.
 
@@ -89,7 +89,7 @@ def augment_audio(
     audio: torch.Tensor,
     frame_labels: torch.Tensor,
     *,
-    p: float = 0.7,
+    p: float = 0.6,
     sample_rate: int = SAMPLE_RATE,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
