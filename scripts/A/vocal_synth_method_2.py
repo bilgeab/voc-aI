@@ -18,6 +18,34 @@ Output contract (per folder):  syntheticdataset/<scoreid>_m2_<speaker>/
 
 The score.tsv header is mandatory: the provided dataloader reads labels with
 np.loadtxt(..., skiprows=1), so a missing header would silently drop the first note.
+
+-----------------------------------------------------------------------------
+QUICK START
+-----------------------------------------------------------------------------
+Run from the repo root. First run auto-downloads LibriTTS dev-clean (~1.2 GB).
+Defaults: 3 speakers/score, 16 kHz int16 WAV, f0-matched speaker selection.
+
+  # Generate the full dataset on one machine (~7-11 h single-threaded):
+  python3 scripts/A/vocal_synth_method_2.py
+
+DISTRIBUTED SYNTHESIS -- split the 400 scores across K devices with --shard I/K.
+Shards are non-overlapping and cover everything; merge the output folders after.
+Speaker choice is deterministic per score, so shards/resumes stay consistent.
+
+  # 4 devices -- run ONE of these per machine (change only the shard index):
+  python3 scripts/A/vocal_synth_method_2.py --shard 0/4 --skip-existing   # device 1
+  python3 scripts/A/vocal_synth_method_2.py --shard 1/4 --skip-existing   # device 2
+  python3 scripts/A/vocal_synth_method_2.py --shard 2/4 --skip-existing   # device 3
+  python3 scripts/A/vocal_synth_method_2.py --shard 3/4 --skip-existing   # device 4
+
+  # Then merge each device's MML26-singing-synthesis/syntheticdataset/ into one
+  # (folder names never collide across shards):
+  rsync -a <device>:.../MML26-singing-synthesis/syntheticdataset/ ./.../syntheticdataset/
+
+  --skip-existing   resume an interrupted run (skips folders already written)
+  --limit N         process only N scores (after shard/start) -- handy for a smoke test
+  --n-speakers N    distinct singers per score (default 3)
+  --self-check      report per-note pitch error in cents
 """
 import argparse
 import random
@@ -30,7 +58,7 @@ import soundfile as sf
 # --- constants -------------------------------------------------------------
 FRAME_PERIOD_MS = 5.0          # WORLD default analysis/synthesis frame period
 A4_HZ = 440.0
-DEFAULT_SR = 22050             # documented contract; dataloader resamples to 16k
+DEFAULT_SR = 16000             # matches the model's SAMPLE_RATE; written as int16 PCM
 PEAK_TARGET = 0.891            # ~ -1 dBFS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +71,14 @@ DEFAULT_LIBRITTS = _REPO_ROOT / ".cache" / "libritts"
 # --- score / F0 ------------------------------------------------------------
 def midi_to_hz(midi):
     return A4_HZ * 2.0 ** ((np.asarray(midi, dtype=np.float64) - 69.0) / 12.0)
+
+
+def _octave_distance(speaker_hz, target_hz):
+    """Pitch stretch in octaves, folded to the nearest octave (0 = perfect, 0.5 = worst)."""
+    if not speaker_hz or speaker_hz <= 0 or target_hz <= 0:
+        return 99.0
+    r = np.log2(target_hz / speaker_hz)
+    return abs(r - round(r))
 
 
 def load_notes(tsv_path):
@@ -128,35 +164,54 @@ class LibriTTSPool:
         return y.astype(np.float64)
 
     def mean_f0(self, speaker_id):
-        """Rough mean voiced F0 for a speaker (one sampled utterance), cached."""
+        """Median voiced speaking F0 for a speaker, cached. Scans a few utterances
+        until enough voiced frames are found (some clips are short/near-silent)."""
         if speaker_id not in self._mean_f0_cache:
             import pyworld as pw
 
-            y = self._load_wav(self.by_speaker[speaker_id][0])
-            f0, _ = pw.harvest(np.ascontiguousarray(y), self.sr)
-            voiced = f0[f0 > 0]
+            voiced_all = []
+            for path in self.by_speaker[speaker_id][:3]:
+                y = self._load_wav(path)
+                if y.size:
+                    f0, _ = pw.harvest(np.ascontiguousarray(y), self.sr)
+                    voiced_all.append(f0[f0 > 0])
+                    if sum(v.size for v in voiced_all) >= 200:
+                        break
+            voiced = np.concatenate(voiced_all) if voiced_all else np.array([])
             self._mean_f0_cache[speaker_id] = float(np.median(voiced)) if voiced.size else 0.0
         return self._mean_f0_cache[speaker_id]
 
-    def select_speakers(self, n, target_hz=None, gender_match=False, f0_match=False):
-        cands = list(self.speakers)
+    def select_speakers(self, n, target_hz=None, rng=None, gender_match=False, f0_match=True):
+        """Choose n speakers for a score.
+
+        ``rng`` should be a per-score random.Random so the choice is deterministic
+        *for that score regardless of processing order* -- this lets independent
+        shards/devices (and resumed runs) produce identical speaker assignments.
+
+        With f0_match (default), rank speakers by how little their natural pitch must
+        be stretched to reach the score's median pitch -- using an *octave-folded*
+        distance, so a speaker an octave away ranks as cleanly as one already in range
+        (WORLD handles octave shifts well; awkward fractional stretches are what hurt).
+        We then sample n from the best-matched pool, preserving timbre variety while
+        avoiding the over-stretched, weak-harmonic voices.
+        """
+        rng = rng or self._rng
+        if f0_match and target_hz:
+            ranked = sorted(self.speakers, key=lambda s: _octave_distance(self.mean_f0(s), target_hz))
+            pool = ranked[: max(n * 3, n + 5)]
+            rng.shuffle(pool)
+            return pool[:n]
         if gender_match and self.gender:
             # No inherent target gender; ensure a balanced mix of M/F when metadata exists.
-            males = [s for s in cands if self.gender.get(s) == "M"]
-            females = [s for s in cands if self.gender.get(s) == "F"]
-            self._rng.shuffle(males)
-            self._rng.shuffle(females)
-            mixed = []
-            for i in range(max(len(males), len(females))):
-                if i < len(females):
-                    mixed.append(females[i])
-                if i < len(males):
-                    mixed.append(males[i])
-            cands = mixed or cands
+            males = [s for s in self.speakers if self.gender.get(s) == "M"]
+            females = [s for s in self.speakers if self.gender.get(s) == "F"]
+            rng.shuffle(males)
+            rng.shuffle(females)
+            mixed = [s for pair in zip(females, males) for s in pair]
+            cands = mixed or list(self.speakers)
         else:
-            self._rng.shuffle(cands)
-        if f0_match and target_hz:
-            cands = sorted(cands, key=lambda s: abs(self.mean_f0(s) - target_hz))
+            cands = list(self.speakers)
+            rng.shuffle(cands)
         return cands[:n]
 
     def speaker_audio(self, speaker_id, target_s):
@@ -238,7 +293,7 @@ def self_check(y, sr, notes, frame_period_ms=FRAME_PERIOD_MS):
 def write_pair(out_dir, score_id, speaker, y, sr, notes):
     d = Path(out_dir) / f"{score_id}_m2_{speaker}"
     d.mkdir(parents=True, exist_ok=True)
-    sf.write(str(d / "audio.wav"), y, sr, subtype="FLOAT")
+    sf.write(str(d / "audio.wav"), y, sr, subtype="PCM_16")
     with open(d / "score.tsv", "w") as f:
         f.write("# onset,offset,note\n")
         for onset, offset, midi in notes:
@@ -248,6 +303,12 @@ def write_pair(out_dir, score_id, speaker, y, sr, notes):
 
 def run(args):
     scores = sorted(Path(args.scores_dir).glob("*.tsv"))
+    if args.shard:
+        idx, cnt = (int(x) for x in args.shard.split("/"))
+        scores = scores[idx::cnt]  # strided => each shard gets a balanced mix of lengths
+        print(f"[shard] {idx}/{cnt} -> {len(scores)} scores")
+    if args.start:
+        scores = scores[args.start:]
     if args.limit:
         scores = scores[: args.limit]
     if not scores:
@@ -265,11 +326,15 @@ def run(args):
         if notes.size == 0:
             continue
         target_hz = float(np.median(midi_to_hz(notes[:, 2])))
+        rng = random.Random(f"{args.seed}:{score_id}")  # deterministic per score (shard/resume safe)
         speakers = pool.select_speakers(
-            args.n_speakers, target_hz=target_hz,
+            args.n_speakers, target_hz=target_hz, rng=rng,
             gender_match=args.gender_match, f0_match=args.f0_match,
         )
         for speaker in speakers:
+            out = Path(args.out_dir) / f"{score_id}_m2_{speaker}"
+            if args.skip_existing and (out / "audio.wav").exists() and (out / "score.tsv").exists():
+                continue
             speech = pool.speaker_audio(speaker, float(notes[:, 1].max()))
             y = synthesize(notes, speech, args.sr)
             write_pair(args.out_dir, score_id, speaker, y, args.sr, notes)
@@ -289,11 +354,17 @@ def build_parser():
     p.add_argument("--scores-dir", type=Path, default=DEFAULT_SCORES)
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     p.add_argument("--libritts-root", type=Path, default=DEFAULT_LIBRITTS)
-    p.add_argument("--n-speakers", type=int, default=5, help="distinct singers per score")
+    p.add_argument("--n-speakers", type=int, default=3, help="distinct singers per score")
     p.add_argument("--sr", type=int, default=DEFAULT_SR)
-    p.add_argument("--limit", type=int, default=0, help="process only first N scores (debug)")
+    p.add_argument("--limit", type=int, default=0, help="process only N scores (after shard/start)")
+    p.add_argument("--start", type=int, default=0, help="skip the first N scores (after sharding)")
+    p.add_argument("--shard", type=str, default=None, metavar="I/K",
+                   help="process only shard I of K, strided: split work across devices, e.g. 0/4")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="resume: skip score/speaker folders already written")
     p.add_argument("--gender-match", action="store_true", help="balance M/F speakers (needs SPEAKERS.txt)")
-    p.add_argument("--f0-match", action="store_true", help="prefer speakers near the score's mean pitch")
+    p.add_argument("--f0-match", action=argparse.BooleanOptionalAction, default=True,
+                   help="prefer speakers whose natural pitch is closest (octave-folded) to the score")
     p.add_argument("--self-check", action="store_true", help="report per-note pitch error in cents")
     p.add_argument("--seed", type=int, default=0)
     return p

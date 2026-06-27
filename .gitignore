@@ -1,5 +1,6 @@
 .idea
 /wandb
+.DS_Store
 
 # Method 2: cached LibriTTS corpus (~1.2 GB) and generated training data
 /.cache/
