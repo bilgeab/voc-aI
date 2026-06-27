@@ -2,7 +2,7 @@
 
 # train on Synthetic, validate/test on Klangio singing dataset
 OUTPUT_DIR="./BASIC_PITCH_CHALLENGE/"
-COMMON="--output-dir $OUTPUT_DIR --logger tensorboard"
+COMMON="--output-dir $OUTPUT_DIR --logger wandb"
 
 python3 -m src.train \
     --train-dataset Synthetic \
@@ -14,5 +14,6 @@ python3 -m src.train \
     --learning-rate 1e-4 \
     --eval-metric COnPOff_f1 \
     --precision 32 \
+    --limit-train-batches 200 \
     --experiment-name "basic_pitch_training" \
     $COMMON
