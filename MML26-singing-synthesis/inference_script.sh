@@ -13,4 +13,4 @@ python -m src.inference \
     --checkpoint-path "$CHECKPOINT_PATH" \
     --input-path "$INPUT_PATH" \
     --output-dir "$OUTPUT_PATH" \
-    --save-activations
+    --export-as-midi

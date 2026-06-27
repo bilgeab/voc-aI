@@ -22,6 +22,7 @@ from .constants import (
     PIANO_MIDI_START,
 )
 from .dataloading import get_dataset_registry
+from .augmentation import augment_audio
 from .basic_pitch_transcriber import BasicPitchTranscriber
 from .transcription_utils import (
     output_to_notes_polyphonic,
@@ -328,8 +329,9 @@ class LightningModuleSingingVoice(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         converted_labels = self.convert_labels(batch["onset"], batch["frame"])
+        audio = augment_audio(batch["audio"], batch["frame"])
         model_outputs = self._forward_with_context(
-            batch["audio"], return_contour=True
+            audio, return_contour=True
         )
         loss_dict = self.compute_losses(model_outputs, converted_labels)
         contour_loss = self.compute_contour_loss(
